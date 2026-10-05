@@ -869,6 +869,8 @@ void dtvcc_handle_CLW_ClearWindows(dtvcc_ctx *dtvcc, dtvcc_service_decoder *deco
 					dtvcc_window_copy_to_screen(decoder, &decoder->windows[i]);
 				}
 				dtvcc_window_clear(decoder, i);
+				/* New text must not reuse the previous caption's start. */
+				decoder->windows[i].time_ms_show = -1;
 			}
 			windows_bitmap >>= 1;
 		}
@@ -1746,6 +1748,14 @@ void dtvcc_process_service_block(dtvcc_ctx *dtvcc,
 			}
 		}
 		i += used;
+
+		/* Set a cleared window's start when new visible text arrives. */
+		if (decoder->current_window != -1)
+		{
+			dtvcc_window *w = &decoder->windows[decoder->current_window];
+			if (w->is_defined && w->visible && !w->is_empty && w->time_ms_show == -1)
+				dtvcc_window_update_time_show(w, dtvcc->timing);
+		}
 	}
 }
 

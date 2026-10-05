@@ -61,6 +61,18 @@ impl dtvcc_service_decoder {
                 used
             };
             i += consumed as usize;
+
+            // Set a cleared window's start when new visible text arrives.
+            if self.current_window != -1 {
+                let window = &mut self.windows[self.current_window as usize];
+                if is_true(window.is_defined)
+                    && is_true(window.visible)
+                    && is_false(window.is_empty)
+                    && window.time_ms_show == -1
+                {
+                    window.update_time_show(timing);
+                }
+            }
         }
     }
 
@@ -371,6 +383,8 @@ impl dtvcc_service_decoder {
                         self.copy_to_screen(&self.windows[i as usize]);
                     }
                     self.windows[i as usize].clear_text();
+                    // New text must not reuse the previous caption's start.
+                    self.windows[i as usize].time_ms_show = -1;
                 }
                 windows_bitmap >>= 1;
             }
@@ -1997,6 +2011,63 @@ mod test {
 
         for row_ptr in decoder.windows[0].rows.iter() {
             unsafe { crate::decoder::window::dealloc_row(*row_ptr) };
+        }
+        unsafe {
+            drop(Box::from_raw(decoder.tv));
+        }
+    }
+
+    #[test]
+    fn test_clw_rebases_start_on_next_visible_character() {
+        use std::ffi::CString;
+
+        // CLW followed by an unchanged DF0 must defer the new start until P16.
+        let mut decoder = get_zero_allocated_obj::<dtvcc_service_decoder>();
+        decoder.current_window = -1;
+        let mut tv = get_zero_allocated_obj::<dtvcc_tv_screen>();
+        tv.service_number = 1;
+        decoder.tv = Box::into_raw(tv);
+
+        let output = tempfile::NamedTempFile::new().unwrap();
+        let filename = CString::new(output.path().to_str().unwrap()).unwrap();
+        let mut encoder = get_zero_allocated_obj::<encoder_ctx>();
+        encoder.dtvcc_writers[0].fd = -1;
+        encoder.dtvcc_writers[0].filename = filename.as_ptr() as *mut _;
+        let mut timing = ccx_common_timing_ctx::default();
+
+        let df0_block = [0x98u8, 0x38, 0xd0, 0x32, 0x72, 0x27, 0x10];
+        let p16 = [0x18u8, 0xbe, 0xc8];
+        let clw_block = [0x88u8, 0xff];
+
+        timing.fts_now = 1000;
+        decoder.process_service_block(&df0_block, &mut encoder, &mut timing, false);
+        decoder.process_service_block(&p16, &mut encoder, &mut timing, false);
+        assert_eq!(decoder.windows[0].is_empty, 0);
+        assert_eq!(decoder.windows[0].time_ms_show, 1000);
+
+        timing.fts_now = 2000;
+        decoder.process_service_block(&clw_block, &mut encoder, &mut timing, false);
+        assert_eq!(decoder.windows[0].is_defined, 1);
+        assert_eq!(decoder.windows[0].visible, 1);
+        assert_eq!(decoder.windows[0].is_empty, 1);
+
+        timing.fts_now = 2500;
+        decoder.process_service_block(&df0_block, &mut encoder, &mut timing, false);
+        assert_eq!(decoder.windows[0].is_empty, 1);
+
+        timing.fts_now = 3000;
+        decoder.process_service_block(&p16, &mut encoder, &mut timing, false);
+        assert_eq!(decoder.windows[0].is_empty, 0);
+        assert_eq!(decoder.windows[0].time_ms_show, 3000);
+
+        timing.fts_now = 3500;
+        decoder.process_service_block(&p16, &mut encoder, &mut timing, false);
+        assert_eq!(decoder.windows[0].time_ms_show, 3000);
+
+        for row_ptr in decoder.windows[0].rows.iter() {
+            if !row_ptr.is_null() {
+                unsafe { crate::decoder::window::dealloc_row(*row_ptr) };
+            }
         }
         unsafe {
             drop(Box::from_raw(decoder.tv));
